@@ -725,9 +725,9 @@ const htmlTemplate = `<!doctype html>
   <div id="map"></div>
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
   <script>
-    const parkingZonesPath = {{printf "%q" .ParkingZonesPath}};
-    const outsideVehiclesPath = {{printf "%q" .OutsidePointsPath}};
-    const top20VehiclesPath = {{printf "%q" .Top20PointsPath}};
+    const parkingZonesPath = "{{.ParkingZonesPath}}";
+    const outsideVehiclesPath = "{{.OutsidePointsPath}}";
+    const top20VehiclesPath = "{{.Top20PointsPath}}";
 
     const map = L.map('map');
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
