@@ -675,11 +675,9 @@ const htmlTemplate = `<!doctype html>
       width: 100vw;
     }
     .panel {
-      position: absolute;
-      top: 16px;
-      left: 16px;
-      z-index: 1000;
-      max-width: 320px;
+      width: min(320px, calc(100vw - 32px));
+      max-height: min(70vh, 560px);
+      overflow: auto;
       padding: 14px 16px;
       background: var(--panel);
       border: 1px solid rgba(18,38,32,0.12);
@@ -689,6 +687,16 @@ const htmlTemplate = `<!doctype html>
     .panel h1 {
       margin: 0 0 8px;
       font-size: 1.15rem;
+    }
+    .panel-toggle {
+      border: 1px solid rgba(18,38,32,0.16);
+      background: rgba(255,255,255,0.9);
+      color: var(--ink);
+      font: inherit;
+      font-size: 0.85rem;
+      padding: 4px 8px;
+      cursor: pointer;
+      box-shadow: 0 4px 14px rgba(18,38,32,0.12);
     }
     .panel p {
       margin: 0.35rem 0;
@@ -707,21 +715,66 @@ const htmlTemplate = `<!doctype html>
       margin-right: 6px;
       vertical-align: middle;
     }
+    .info-control {
+      background: transparent;
+      box-shadow: none;
+    }
+    .info-control .panel-toggle,
+    .info-control .panel {
+      display: block;
+      width: 100%;
+      box-sizing: border-box;
+    }
+    .info-control .panel-toggle {
+      box-shadow: 0 4px 14px rgba(18,38,32,0.12);
+    }
+    .info-control:not(.is-open) .panel {
+      display: none;
+    }
+    .leaflet-top.leaflet-right {
+      display: flex;
+      flex-direction: column;
+      align-items: stretch;
+      gap: 8px;
+    }
+    .leaflet-control-layers {
+      max-width: min(280px, calc(100vw - 24px));
+    }
+    @media (max-width: 640px) {
+      .panel {
+        width: min(300px, calc(100vw - 24px));
+        max-height: min(62vh, 460px);
+        padding: 12px 14px;
+      }
+      .panel h1 {
+        font-size: 1rem;
+        line-height: 1.15;
+      }
+      .panel p {
+        font-size: 0.88rem;
+      }
+      .panel .hint {
+        font-size: 0.8rem;
+      }
+      .leaflet-control-zoom {
+        margin-top: 12px;
+      }
+      .leaflet-top.leaflet-right,
+      .leaflet-top.leaflet-left {
+        gap: 6px;
+      }
+      .leaflet-control-layers {
+        font-size: 0.9rem;
+        max-width: min(240px, calc(100vw - 24px));
+      }
+      .info-control .panel-toggle {
+        font-size: 0.82rem;
+        padding: 5px 8px;
+      }
+    }
   </style>
 </head>
 <body>
-  <div class="panel">
-    <h1>Bird Halifax: vehicles and parking zones</h1>
-    <p><strong>{{.OutsideVehicles}}</strong> of <strong>{{.TotalVehicles}}</strong> live vehicles are outside a designated parking zone.</p>
-    <p><strong>{{.Top20Vehicles}}</strong> vehicles are highlighted as the furthest from any designated parking zone.</p>
-    <p>Feed updated: {{.LastUpdated}}</p>
-    <p>Generated: {{.GeneratedAt}}</p>
-    <p><span class="legend-dot" style="background:#00798c;"></span>Designated parking zone</p>
-    <p><span class="legend-dot" style="background:#f2c14e;"></span>Parking zone center marker</p>
-    <p><span class="legend-dot" style="background:#d64933;"></span>Vehicle outside parking zone</p>
-    <p><span class="legend-dot" style="background:#111827;"></span>Top 20 furthest vehicles</p>
-    <p class="hint">Click a teal zone or gold marker to see the parking location name. Click a red or black marker for distance details.</p>
-  </div>
   <div id="map"></div>
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
   <script>
@@ -734,6 +787,38 @@ const htmlTemplate = `<!doctype html>
       maxZoom: 19,
       attribution: '&copy; OpenStreetMap contributors'
     }).addTo(map);
+
+    const InfoControl = L.Control.extend({
+      options: { position: 'topright' },
+      onAdd: () => {
+        const container = L.DomUtil.create('div', 'leaflet-control info-control');
+        const button = L.DomUtil.create('button', 'panel-toggle', container);
+        button.type = 'button';
+        button.textContent = 'Info';
+        button.setAttribute('aria-expanded', 'false');
+        const panel = L.DomUtil.create('div', 'panel', container);
+        panel.innerHTML =
+          '<h1>Map Info</h1>' +
+          '<p><strong>{{.OutsideVehicles}}</strong> of <strong>{{.TotalVehicles}}</strong> live vehicles are outside a designated parking zone.</p>' +
+          '<p><strong>{{.Top20Vehicles}}</strong> vehicles are highlighted as the furthest from any designated parking zone.</p>' +
+          '<p>Feed updated: {{.LastUpdated}}</p>' +
+          '<p>Generated: {{.GeneratedAt}}</p>' +
+          '<p><span class="legend-dot" style="background:#00798c;"></span>Designated parking zone</p>' +
+          '<p><span class="legend-dot" style="background:#f2c14e;"></span>Parking zone center marker</p>' +
+          '<p><span class="legend-dot" style="background:#d64933;"></span>Vehicle outside parking zone</p>' +
+          '<p><span class="legend-dot" style="background:#111827;"></span>Top 20 furthest vehicles</p>' +
+          '<p class="hint">Click a teal zone or gold marker to see the parking location name. Click a red or black marker for distance details.</p>';
+        L.DomEvent.disableClickPropagation(container);
+        const setOpen = (open) => {
+          container.classList.toggle('is-open', open);
+          button.textContent = open ? 'Hide Info' : 'Info';
+          button.setAttribute('aria-expanded', String(open));
+        };
+        L.DomEvent.on(button, 'click', () => setOpen(!container.classList.contains('is-open')));
+        return container;
+      }
+    });
+    map.addControl(new InfoControl());
 
     function extendBounds(bounds, layer) {
       if (layer.getBounds) {
@@ -855,7 +940,7 @@ const htmlTemplate = `<!doctype html>
         'Vehicles outside parking zones': markerLayer,
         'Top 20 furthest vehicles': top20Layer
       }, {
-        collapsed: false
+        collapsed: true
       }).addTo(map);
 
       const bounds = L.latLngBounds([]);
