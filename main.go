@@ -955,6 +955,11 @@ const htmlTemplate = `<!doctype html>
       map.setView([44.6488, -63.5752], 13);
     });
   </script>
+  <script>
+    window.goatcounter = {
+        path: function(p) { return location.host + p }
+    }
+  </script>
   <script data-goatcounter="https://s.danp.net/count" async src="//s.danp.net/count.js"></script>
 </body>
 </html>
