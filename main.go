@@ -107,6 +107,7 @@ type rankedVehicle struct {
 	Vehicle         vehicle
 	SamePlaceSince  *int64
 	SamePlaceSecs   *int64
+	DwellKnown      bool
 	DistanceMeters  float64
 	NearestZoneName string
 }
@@ -156,6 +157,7 @@ type vehicleSnapshot struct {
 	Vehicle               vehicle
 	SamePlaceSince        *int64
 	SamePlaceDurationSecs *int64
+	DwellKnown            bool
 }
 
 func main() {
@@ -461,6 +463,7 @@ func rankVehicle(snapshot vehicleSnapshot, zones []namedZone) rankedVehicle {
 		Vehicle:        snapshot.Vehicle,
 		SamePlaceSince: snapshot.SamePlaceSince,
 		SamePlaceSecs:  snapshot.SamePlaceDurationSecs,
+		DwellKnown:     snapshot.DwellKnown,
 		DistanceMeters: math.MaxFloat64,
 	}
 
@@ -656,11 +659,15 @@ func mergeVehicleState(current []vehicle, snapshotUpdated int64, previous *vehic
 
 	merged := make([]vehicleSnapshot, 0, len(current))
 	for _, bike := range current {
-		var samePlaceSince *int64
-		var samePlaceDuration *int64
+		since := bike.LastReported
+		if since == 0 {
+			since = snapshotUpdated
+		}
+		duration := int64(0)
+		dwellKnown := false
 
 		if prev, ok := prevByPosition[vehiclePositionKey(bike.Lat, bike.Lon)]; ok {
-			since := prev.SamePlaceSince
+			since = prev.SamePlaceSince
 			if since == 0 {
 				since = prev.LastReported
 			}
@@ -669,19 +676,19 @@ func mergeVehicleState(current []vehicle, snapshotUpdated int64, previous *vehic
 			}
 
 			if since != 0 {
-				duration := snapshotUpdated - since
+				duration = snapshotUpdated - since
 				if duration < 0 {
 					duration = 0
 				}
-				samePlaceSince = &since
-				samePlaceDuration = &duration
+				dwellKnown = true
 			}
 		}
 
 		merged = append(merged, vehicleSnapshot{
 			Vehicle:               bike,
-			SamePlaceSince:        samePlaceSince,
-			SamePlaceDurationSecs: samePlaceDuration,
+			SamePlaceSince:        &since,
+			SamePlaceDurationSecs: &duration,
+			DwellKnown:            dwellKnown,
 		})
 	}
 
@@ -712,8 +719,8 @@ func writeOutsideGeoJSON(path string, outside []rankedVehicle, typeNames map[str
 				"is_disabled":        bike.Vehicle.IsDisabled,
 				"is_reserved":        bike.Vehicle.IsReserved,
 				"last_reported":      bike.Vehicle.LastReported,
-				"same_place_since":   optionalInt64Value(bike.SamePlaceSince),
-				"same_place_seconds": optionalInt64Value(bike.SamePlaceSecs),
+				"same_place_since":   dwellValue(bike.DwellKnown, bike.SamePlaceSince),
+				"same_place_seconds": dwellValue(bike.DwellKnown, bike.SamePlaceSecs),
 				"distance_meters":    bike.DistanceMeters,
 				"nearest_zone_name":  bike.NearestZoneName,
 			},
@@ -736,6 +743,13 @@ func optionalInt64Value(v *int64) interface{} {
 		return nil
 	}
 	return *v
+}
+
+func dwellValue(known bool, v *int64) interface{} {
+	if !known {
+		return nil
+	}
+	return optionalInt64Value(v)
 }
 
 func writeHTMLMap(path string, lastUpdated int64, total int, outsideCount int, top20Count int) error {
@@ -812,8 +826,8 @@ func convertOutsideFeatures(outside []rankedVehicle, typeNames map[string]string
 				"is_disabled":        bike.Vehicle.IsDisabled,
 				"is_reserved":        bike.Vehicle.IsReserved,
 				"last_reported":      bike.Vehicle.LastReported,
-				"same_place_since":   optionalInt64Value(bike.SamePlaceSince),
-				"same_place_seconds": optionalInt64Value(bike.SamePlaceSecs),
+				"same_place_since":   dwellValue(bike.DwellKnown, bike.SamePlaceSince),
+				"same_place_seconds": dwellValue(bike.DwellKnown, bike.SamePlaceSecs),
 				"distance_meters":    bike.DistanceMeters,
 				"nearest_zone_name":  bike.NearestZoneName,
 				"rank":               idx + 1,
