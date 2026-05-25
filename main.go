@@ -11,7 +11,6 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 )
@@ -690,7 +689,7 @@ func mergeVehicleState(current []vehicle, snapshotUpdated int64, previous *vehic
 }
 
 func vehiclePositionKey(lat, lon float64) string {
-	return strconv.FormatFloat(lat, 'g', -1, 64) + "," + strconv.FormatFloat(lon, 'g', -1, 64)
+	return fmt.Sprintf("%.6f,%.6f", lat, lon)
 }
 
 func writeOutsideGeoJSON(path string, outside []rankedVehicle, typeNames map[string]string) error {
