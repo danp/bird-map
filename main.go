@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -24,7 +25,6 @@ const (
 	stateFileName     = "vehicle_state.json"
 	htmlMapName       = "index.html"
 	requestTimeout    = 20 * time.Second
-	samePlaceMeters   = 5.0
 )
 
 type gbfsRoot struct {
@@ -106,8 +106,8 @@ type namedZone struct {
 
 type rankedVehicle struct {
 	Vehicle         vehicle
-	SamePlaceSince  int64
-	SamePlaceSecs   int64
+	SamePlaceSince  *int64
+	SamePlaceSecs   *int64
 	DistanceMeters  float64
 	NearestZoneName string
 }
@@ -155,8 +155,8 @@ type vehicleState struct {
 
 type vehicleSnapshot struct {
 	Vehicle               vehicle
-	SamePlaceSince        int64
-	SamePlaceDurationSecs int64
+	SamePlaceSince        *int64
+	SamePlaceDurationSecs *int64
 }
 
 func main() {
@@ -648,55 +648,49 @@ func publishedStateURL() string {
 }
 
 func mergeVehicleState(current []vehicle, snapshotUpdated int64, previous *vehicleStateCollection) []vehicleSnapshot {
-	prevByBike := map[string]vehicleState{}
+	prevByPosition := map[string]vehicleState{}
 	if previous != nil {
 		for _, prev := range previous.Vehicles {
-			prevByBike[prev.BikeID] = prev
+			prevByPosition[vehiclePositionKey(prev.Lat, prev.Lon)] = prev
 		}
 	}
 
 	merged := make([]vehicleSnapshot, 0, len(current))
 	for _, bike := range current {
-		samePlaceSince := bike.LastReported
-		if samePlaceSince == 0 {
-			samePlaceSince = snapshotUpdated
-		}
+		var samePlaceSince *int64
+		var samePlaceDuration *int64
 
-		if prev, ok := prevByBike[bike.BikeID]; ok {
-			if distanceBetweenMeters(point{Lon: bike.Lon, Lat: bike.Lat}, point{Lon: prev.Lon, Lat: prev.Lat}) <= samePlaceMeters {
-				samePlaceSince = prev.SamePlaceSince
-				if samePlaceSince == 0 {
-					samePlaceSince = prev.LastReported
-				}
-				if samePlaceSince == 0 && previous != nil {
-					samePlaceSince = previous.LastUpdated
-				}
+		if prev, ok := prevByPosition[vehiclePositionKey(bike.Lat, bike.Lon)]; ok {
+			since := prev.SamePlaceSince
+			if since == 0 {
+				since = prev.LastReported
 			}
-		}
+			if since == 0 && previous != nil {
+				since = previous.LastUpdated
+			}
 
-		duration := snapshotUpdated - samePlaceSince
-		if duration < 0 {
-			duration = 0
+			if since != 0 {
+				duration := snapshotUpdated - since
+				if duration < 0 {
+					duration = 0
+				}
+				samePlaceSince = &since
+				samePlaceDuration = &duration
+			}
 		}
 
 		merged = append(merged, vehicleSnapshot{
 			Vehicle:               bike,
 			SamePlaceSince:        samePlaceSince,
-			SamePlaceDurationSecs: duration,
+			SamePlaceDurationSecs: samePlaceDuration,
 		})
 	}
 
 	return merged
 }
 
-func distanceBetweenMeters(a, b point) float64 {
-	lat0 := ((a.Lat + b.Lat) / 2) * math.Pi / 180
-	cosLat := math.Cos(lat0)
-	const metersPerDegreeLat = 111320.0
-
-	x := (b.Lon - a.Lon) * cosLat * metersPerDegreeLat
-	y := (b.Lat - a.Lat) * metersPerDegreeLat
-	return math.Hypot(x, y)
+func vehiclePositionKey(lat, lon float64) string {
+	return strconv.FormatFloat(lat, 'g', -1, 64) + "," + strconv.FormatFloat(lon, 'g', -1, 64)
 }
 
 func writeOutsideGeoJSON(path string, outside []rankedVehicle, typeNames map[string]string) error {
@@ -719,8 +713,8 @@ func writeOutsideGeoJSON(path string, outside []rankedVehicle, typeNames map[str
 				"is_disabled":        bike.Vehicle.IsDisabled,
 				"is_reserved":        bike.Vehicle.IsReserved,
 				"last_reported":      bike.Vehicle.LastReported,
-				"same_place_since":   bike.SamePlaceSince,
-				"same_place_seconds": bike.SamePlaceSecs,
+				"same_place_since":   optionalInt64Value(bike.SamePlaceSince),
+				"same_place_seconds": optionalInt64Value(bike.SamePlaceSecs),
 				"distance_meters":    bike.DistanceMeters,
 				"nearest_zone_name":  bike.NearestZoneName,
 			},
@@ -736,6 +730,13 @@ func writeFeatureCollection(path string, fc outputFeatureCollection) error {
 		return err
 	}
 	return os.WriteFile(path, data, 0o644)
+}
+
+func optionalInt64Value(v *int64) interface{} {
+	if v == nil {
+		return nil
+	}
+	return *v
 }
 
 func writeHTMLMap(path string, lastUpdated int64, total int, outsideCount int, top20Count int) error {
@@ -771,13 +772,22 @@ func writeVehicleState(path string, lastUpdated int64, snapshots []vehicleSnapsh
 	}
 
 	for _, snapshot := range snapshots {
+		samePlaceSince := int64(0)
+		samePlaceDuration := int64(0)
+		if snapshot.SamePlaceSince != nil {
+			samePlaceSince = *snapshot.SamePlaceSince
+		}
+		if snapshot.SamePlaceDurationSecs != nil {
+			samePlaceDuration = *snapshot.SamePlaceDurationSecs
+		}
+
 		state.Vehicles = append(state.Vehicles, vehicleState{
 			BikeID:                snapshot.Vehicle.BikeID,
 			Lat:                   snapshot.Vehicle.Lat,
 			Lon:                   snapshot.Vehicle.Lon,
 			LastReported:          snapshot.Vehicle.LastReported,
-			SamePlaceSince:        snapshot.SamePlaceSince,
-			SamePlaceDurationSecs: snapshot.SamePlaceDurationSecs,
+			SamePlaceSince:        samePlaceSince,
+			SamePlaceDurationSecs: samePlaceDuration,
 		})
 	}
 
@@ -803,8 +813,8 @@ func convertOutsideFeatures(outside []rankedVehicle, typeNames map[string]string
 				"is_disabled":        bike.Vehicle.IsDisabled,
 				"is_reserved":        bike.Vehicle.IsReserved,
 				"last_reported":      bike.Vehicle.LastReported,
-				"same_place_since":   bike.SamePlaceSince,
-				"same_place_seconds": bike.SamePlaceSecs,
+				"same_place_since":   optionalInt64Value(bike.SamePlaceSince),
+				"same_place_seconds": optionalInt64Value(bike.SamePlaceSecs),
 				"distance_meters":    bike.DistanceMeters,
 				"nearest_zone_name":  bike.NearestZoneName,
 				"rank":               idx + 1,
@@ -985,10 +995,17 @@ const htmlTemplate = `<!doctype html>
     }
 
     function formatTimestamp(unixSeconds) {
+      if (unixSeconds == null) {
+        return 'unknown';
+      }
       return new Date(unixSeconds * 1000).toISOString();
     }
 
     function dwellHTML(props) {
+      if (props.same_place_seconds == null || props.same_place_since == null) {
+        return 'Stayed here: unknown<br>' +
+          'Same spot since: unknown<br>';
+      }
       return 'Stayed here: ' + formatDuration(props.same_place_seconds) + '<br>' +
         'Same spot since: ' + formatTimestamp(props.same_place_since) + '<br>';
     }
