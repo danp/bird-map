@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -20,8 +21,10 @@ const (
 	geoJSONName       = "vehicles_outside_parking.geojson"
 	parkingZonesName  = "parking_zones.geojson"
 	top20VehiclesName = "top_20_furthest_vehicles.geojson"
+	stateFileName     = "vehicle_state.json"
 	htmlMapName       = "index.html"
 	requestTimeout    = 20 * time.Second
+	samePlaceMeters   = 5.0
 )
 
 type gbfsRoot struct {
@@ -103,6 +106,8 @@ type namedZone struct {
 
 type rankedVehicle struct {
 	Vehicle         vehicle
+	SamePlaceSince  int64
+	SamePlaceSecs   int64
 	DistanceMeters  float64
 	NearestZoneName string
 }
@@ -134,6 +139,26 @@ type mapTemplateData struct {
 	Top20PointsPath   string
 }
 
+type vehicleStateCollection struct {
+	LastUpdated int64          `json:"last_updated"`
+	Vehicles    []vehicleState `json:"vehicles"`
+}
+
+type vehicleState struct {
+	BikeID                string  `json:"bike_id"`
+	Lat                   float64 `json:"lat"`
+	Lon                   float64 `json:"lon"`
+	LastReported          int64   `json:"last_reported"`
+	SamePlaceSince        int64   `json:"same_place_since"`
+	SamePlaceDurationSecs int64   `json:"same_place_duration_seconds"`
+}
+
+type vehicleSnapshot struct {
+	Vehicle               vehicle
+	SamePlaceSince        int64
+	SamePlaceDurationSecs int64
+}
+
 func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), requestTimeout)
 	defer cancel()
@@ -152,6 +177,12 @@ func main() {
 	if err := fetchJSON(ctx, feedURLs["free_bike_status"], &bikes); err != nil {
 		exitf("fetch free_bike_status: %v", err)
 	}
+
+	previousState, err := loadPreviousVehicleState(ctx)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "load previous vehicle state: %v\n", err)
+	}
+	snapshots := mergeVehicleState(bikes.Data.Bikes, bikes.LastUpdated, previousState)
 
 	var zones geofencingZones
 	if err := fetchJSON(ctx, feedURLs["geofencing_zones"], &zones); err != nil {
@@ -183,17 +214,17 @@ func main() {
 		exitf("extract station zones: %v", err)
 	}
 
-	outsideGeofenced := make([]vehicle, 0)
-	for _, bike := range bikes.Data.Bikes {
-		if !pointInAnyZone(point{Lon: bike.Lon, Lat: bike.Lat}, parkingZones) {
-			outsideGeofenced = append(outsideGeofenced, bike)
+	outsideGeofenced := make([]vehicleSnapshot, 0)
+	for _, snapshot := range snapshots {
+		if !pointInAnyZone(point{Lon: snapshot.Vehicle.Lon, Lat: snapshot.Vehicle.Lat}, parkingZones) {
+			outsideGeofenced = append(outsideGeofenced, snapshot)
 		}
 	}
 
 	outsideStations := make([]rankedVehicle, 0)
-	allRanked := make([]rankedVehicle, 0, len(bikes.Data.Bikes))
-	for _, bike := range bikes.Data.Bikes {
-		ranked := rankVehicle(bike, stationZones)
+	allRanked := make([]rankedVehicle, 0, len(snapshots))
+	for _, snapshot := range snapshots {
+		ranked := rankVehicle(snapshot, stationZones)
 		allRanked = append(allRanked, ranked)
 		if ranked.DistanceMeters > 0 {
 			outsideStations = append(outsideStations, ranked)
@@ -222,6 +253,11 @@ func main() {
 		Features: rawStationFeatures,
 	}); err != nil {
 		exitf("write parking zones geojson: %v", err)
+	}
+
+	statePath := filepath.Join(outputDir, stateFileName)
+	if err := writeVehicleState(statePath, bikes.LastUpdated, snapshots); err != nil {
+		exitf("write vehicle state: %v", err)
 	}
 
 	top20Path := filepath.Join(outputDir, top20VehiclesName)
@@ -420,10 +456,12 @@ func pointInAnyZone(pt point, zones []multiPolygon) bool {
 	return false
 }
 
-func rankVehicle(bike vehicle, zones []namedZone) rankedVehicle {
-	pt := point{Lon: bike.Lon, Lat: bike.Lat}
+func rankVehicle(snapshot vehicleSnapshot, zones []namedZone) rankedVehicle {
+	pt := point{Lon: snapshot.Vehicle.Lon, Lat: snapshot.Vehicle.Lat}
 	best := rankedVehicle{
-		Vehicle:        bike,
+		Vehicle:        snapshot.Vehicle,
+		SamePlaceSince: snapshot.SamePlaceSince,
+		SamePlaceSecs:  snapshot.SamePlaceDurationSecs,
 		DistanceMeters: math.MaxFloat64,
 	}
 
@@ -554,6 +592,113 @@ func cross(a, b, c point) float64 {
 	return (b.Lon-a.Lon)*(c.Lat-a.Lat) - (b.Lat-a.Lat)*(c.Lon-a.Lon)
 }
 
+func loadPreviousVehicleState(ctx context.Context) (*vehicleStateCollection, error) {
+	remoteURL := publishedStateURL()
+	if remoteURL != "" {
+		var remote vehicleStateCollection
+		if err := fetchJSON(ctx, remoteURL, &remote); err == nil {
+			return &remote, nil
+		}
+	}
+
+	if local, err := readVehicleStateFile(filepath.Join(outputDir, stateFileName)); err == nil {
+		return local, nil
+	} else if !os.IsNotExist(err) {
+		return nil, err
+	}
+
+	return nil, nil
+}
+
+func readVehicleStateFile(path string) (*vehicleStateCollection, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+
+	var state vehicleStateCollection
+	if err := json.Unmarshal(data, &state); err != nil {
+		return nil, err
+	}
+	return &state, nil
+}
+
+func publishedStateURL() string {
+	if url := os.Getenv("PUBLISHED_STATE_URL"); url != "" {
+		return url
+	}
+
+	base := os.Getenv("PUBLISHED_SITE_URL")
+	if base == "" {
+		owner := os.Getenv("GITHUB_REPOSITORY_OWNER")
+		repo := os.Getenv("GITHUB_REPOSITORY")
+		if owner == "" || repo == "" {
+			return ""
+		}
+
+		repoName := filepath.Base(repo)
+		if repoName == owner+".github.io" {
+			base = "https://" + repoName + "/"
+		} else {
+			base = "https://" + owner + ".github.io/" + repoName + "/"
+		}
+	}
+
+	return strings.TrimRight(base, "/") + "/" + stateFileName
+}
+
+func mergeVehicleState(current []vehicle, snapshotUpdated int64, previous *vehicleStateCollection) []vehicleSnapshot {
+	prevByBike := map[string]vehicleState{}
+	if previous != nil {
+		for _, prev := range previous.Vehicles {
+			prevByBike[prev.BikeID] = prev
+		}
+	}
+
+	merged := make([]vehicleSnapshot, 0, len(current))
+	for _, bike := range current {
+		samePlaceSince := bike.LastReported
+		if samePlaceSince == 0 {
+			samePlaceSince = snapshotUpdated
+		}
+
+		if prev, ok := prevByBike[bike.BikeID]; ok {
+			if distanceBetweenMeters(point{Lon: bike.Lon, Lat: bike.Lat}, point{Lon: prev.Lon, Lat: prev.Lat}) <= samePlaceMeters {
+				samePlaceSince = prev.SamePlaceSince
+				if samePlaceSince == 0 {
+					samePlaceSince = prev.LastReported
+				}
+				if samePlaceSince == 0 && previous != nil {
+					samePlaceSince = previous.LastUpdated
+				}
+			}
+		}
+
+		duration := snapshotUpdated - samePlaceSince
+		if duration < 0 {
+			duration = 0
+		}
+
+		merged = append(merged, vehicleSnapshot{
+			Vehicle:               bike,
+			SamePlaceSince:        samePlaceSince,
+			SamePlaceDurationSecs: duration,
+		})
+	}
+
+	return merged
+}
+
+func distanceBetweenMeters(a, b point) float64 {
+	lat0 := ((a.Lat + b.Lat) / 2) * math.Pi / 180
+	cosLat := math.Cos(lat0)
+	const metersPerDegreeLat = 111320.0
+
+	x := (b.Lon - a.Lon) * cosLat * metersPerDegreeLat
+	y := (b.Lat - a.Lat) * metersPerDegreeLat
+	return math.Hypot(x, y)
+}
+
 func writeOutsideGeoJSON(path string, outside []rankedVehicle, typeNames map[string]string) error {
 	fc := outputFeatureCollection{
 		Type:     "FeatureCollection",
@@ -568,14 +713,16 @@ func writeOutsideGeoJSON(path string, outside []rankedVehicle, typeNames map[str
 				Coordinates: []float64{bike.Vehicle.Lon, bike.Vehicle.Lat},
 			},
 			Properties: map[string]interface{}{
-				"bike_id":           bike.Vehicle.BikeID,
-				"vehicle_type_id":   bike.Vehicle.VehicleTypeID,
-				"vehicle_type":      typeNames[bike.Vehicle.VehicleTypeID],
-				"is_disabled":       bike.Vehicle.IsDisabled,
-				"is_reserved":       bike.Vehicle.IsReserved,
-				"last_reported":     bike.Vehicle.LastReported,
-				"distance_meters":   bike.DistanceMeters,
-				"nearest_zone_name": bike.NearestZoneName,
+				"bike_id":            bike.Vehicle.BikeID,
+				"vehicle_type_id":    bike.Vehicle.VehicleTypeID,
+				"vehicle_type":       typeNames[bike.Vehicle.VehicleTypeID],
+				"is_disabled":        bike.Vehicle.IsDisabled,
+				"is_reserved":        bike.Vehicle.IsReserved,
+				"last_reported":      bike.Vehicle.LastReported,
+				"same_place_since":   bike.SamePlaceSince,
+				"same_place_seconds": bike.SamePlaceSecs,
+				"distance_meters":    bike.DistanceMeters,
+				"nearest_zone_name":  bike.NearestZoneName,
 			},
 		})
 	}
@@ -617,6 +764,30 @@ func writeHTMLMap(path string, lastUpdated int64, total int, outsideCount int, t
 	return tpl.Execute(f, data)
 }
 
+func writeVehicleState(path string, lastUpdated int64, snapshots []vehicleSnapshot) error {
+	state := vehicleStateCollection{
+		LastUpdated: lastUpdated,
+		Vehicles:    make([]vehicleState, 0, len(snapshots)),
+	}
+
+	for _, snapshot := range snapshots {
+		state.Vehicles = append(state.Vehicles, vehicleState{
+			BikeID:                snapshot.Vehicle.BikeID,
+			Lat:                   snapshot.Vehicle.Lat,
+			Lon:                   snapshot.Vehicle.Lon,
+			LastReported:          snapshot.Vehicle.LastReported,
+			SamePlaceSince:        snapshot.SamePlaceSince,
+			SamePlaceDurationSecs: snapshot.SamePlaceDurationSecs,
+		})
+	}
+
+	data, err := json.Marshal(state)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, data, 0o644)
+}
+
 func convertOutsideFeatures(outside []rankedVehicle, typeNames map[string]string) []outputFeature {
 	out := make([]outputFeature, 0, len(outside))
 	for idx, bike := range outside {
@@ -627,14 +798,16 @@ func convertOutsideFeatures(outside []rankedVehicle, typeNames map[string]string
 				Coordinates: []float64{bike.Vehicle.Lon, bike.Vehicle.Lat},
 			},
 			Properties: map[string]interface{}{
-				"bike_id":           bike.Vehicle.BikeID,
-				"vehicle_type":      typeNames[bike.Vehicle.VehicleTypeID],
-				"is_disabled":       bike.Vehicle.IsDisabled,
-				"is_reserved":       bike.Vehicle.IsReserved,
-				"last_reported":     bike.Vehicle.LastReported,
-				"distance_meters":   bike.DistanceMeters,
-				"nearest_zone_name": bike.NearestZoneName,
-				"rank":              idx + 1,
+				"bike_id":            bike.Vehicle.BikeID,
+				"vehicle_type":       typeNames[bike.Vehicle.VehicleTypeID],
+				"is_disabled":        bike.Vehicle.IsDisabled,
+				"is_reserved":        bike.Vehicle.IsReserved,
+				"last_reported":      bike.Vehicle.LastReported,
+				"same_place_since":   bike.SamePlaceSince,
+				"same_place_seconds": bike.SamePlaceSecs,
+				"distance_meters":    bike.DistanceMeters,
+				"nearest_zone_name":  bike.NearestZoneName,
+				"rank":               idx + 1,
 			},
 		})
 	}
@@ -782,6 +955,44 @@ const htmlTemplate = `<!doctype html>
     const outsideVehiclesPath = "{{.OutsidePointsPath}}";
     const top20VehiclesPath = "{{.Top20PointsPath}}";
 
+    function formatDuration(totalSeconds) {
+      const seconds = Math.max(0, Number(totalSeconds) || 0);
+      if (seconds < 60) {
+        return 'under a minute';
+      }
+
+      const units = [
+        ['day', 86400],
+        ['hour', 3600],
+        ['minute', 60]
+      ];
+      const parts = [];
+      let remaining = seconds;
+
+      for (const [label, size] of units) {
+        if (parts.length === 2) {
+          break;
+        }
+        const count = Math.floor(remaining / size);
+        if (!count) {
+          continue;
+        }
+        parts.push(count + ' ' + label + (count === 1 ? '' : 's'));
+        remaining -= count * size;
+      }
+
+      return parts.join(' ');
+    }
+
+    function formatTimestamp(unixSeconds) {
+      return new Date(unixSeconds * 1000).toISOString();
+    }
+
+    function dwellHTML(props) {
+      return 'Stayed here: ' + formatDuration(props.same_place_seconds) + '<br>' +
+        'Same spot since: ' + formatTimestamp(props.same_place_since) + '<br>';
+    }
+
     const map = L.map('map');
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
       maxZoom: 19,
@@ -904,9 +1115,10 @@ const htmlTemplate = `<!doctype html>
             'Vehicle ID: ' + props.bike_id + '<br>' +
             'Nearest zone: ' + props.nearest_zone_name + '<br>' +
             'Distance to nearest zone: ' + Math.round(props.distance_meters) + ' m<br>' +
+            dwellHTML(props) +
             'Disabled: ' + props.is_disabled + '<br>' +
             'Reserved: ' + props.is_reserved + '<br>' +
-            'Last reported: ' + new Date(props.last_reported * 1000).toISOString()
+            'Last reported: ' + formatTimestamp(props.last_reported)
           );
         }
       }).addTo(map);
@@ -927,9 +1139,10 @@ const htmlTemplate = `<!doctype html>
             'Vehicle ID: ' + props.bike_id + '<br>' +
             'Nearest zone: ' + props.nearest_zone_name + '<br>' +
             'Distance to nearest zone: ' + Math.round(props.distance_meters) + ' m<br>' +
+            dwellHTML(props) +
             'Disabled: ' + props.is_disabled + '<br>' +
             'Reserved: ' + props.is_reserved + '<br>' +
-            'Last reported: ' + new Date(props.last_reported * 1000).toISOString()
+            'Last reported: ' + formatTimestamp(props.last_reported)
           );
         }
       }).addTo(map);

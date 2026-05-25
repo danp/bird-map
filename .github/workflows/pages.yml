@@ -31,6 +31,8 @@ jobs:
           cache: true
 
       - name: Generate site artifacts
+        env:
+          PUBLISHED_SITE_URL: http://bird-map.danp.net
         run: go run .
 
       - name: Upload Pages artifact

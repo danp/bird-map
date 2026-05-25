@@ -5,6 +5,7 @@ This repo generates a GitHub Pages site showing:
 - designated Bird parking zones in Halifax
 - vehicles outside designated parking zones
 - the top 20 vehicles furthest from any designated parking zone
+- how long each vehicle has remained in the same spot
 
 ## Local run
 
@@ -16,6 +17,10 @@ Generated files land in `output/`:
 
 - `output/index.html`
 - `output/vehicles_outside_parking.geojson`
+- `output/top_20_furthest_vehicles.geojson`
+- `output/vehicle_state.json`
+
+For local runs, the generator reuses `output/vehicle_state.json` when present so the dwell timer carries forward between runs. On GitHub Pages builds, the app derives the current Pages URL from the repository metadata and merges the last published `vehicle_state.json` into the new snapshot. Set `PUBLISHED_SITE_URL` or `PUBLISHED_STATE_URL` if you need to override that, such as with a custom domain.
 
 ## GitHub Pages deployment
 
