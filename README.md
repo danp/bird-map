@@ -20,7 +20,7 @@ Generated files land in `output/`:
 - `output/top_20_furthest_vehicles.geojson`
 - `output/vehicle_state.json`
 
-For local runs, the generator reuses `output/vehicle_state.json` when present so the dwell timer carries forward between runs. On GitHub Pages builds, the app derives the current Pages URL from the repository metadata and merges the last published `vehicle_state.json` into the new snapshot. Set `PUBLISHED_SITE_URL` or `PUBLISHED_STATE_URL` if you need to override that, such as with a custom domain.
+For local runs, the generator reuses `output/vehicle_state.json` when present so the dwell timer carries forward between runs. On GitHub Pages builds, the app derives the current Pages URL from the repository metadata and merges the last published `vehicle_state.json` into the new snapshot. Dwell tracking matches each current vehicle to the nearest prior vehicle within 2 meters, using fuel percent and range as tie-breakers when multiple prior vehicles are nearby. Set `PUBLISHED_SITE_URL` or `PUBLISHED_STATE_URL` if you need to override that, such as with a custom domain.
 
 ## GitHub Pages deployment
 

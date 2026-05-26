@@ -24,6 +24,7 @@ const (
 	stateFileName     = "vehicle_state.json"
 	htmlMapName       = "index.html"
 	requestTimeout    = 20 * time.Second
+	samePlaceMeters   = 2.0
 )
 
 type gbfsRoot struct {
@@ -43,13 +44,15 @@ type freeBikeStatus struct {
 }
 
 type vehicle struct {
-	BikeID        string  `json:"bike_id"`
-	Lat           float64 `json:"lat"`
-	Lon           float64 `json:"lon"`
-	IsDisabled    bool    `json:"is_disabled"`
-	IsReserved    bool    `json:"is_reserved"`
-	VehicleTypeID string  `json:"vehicle_type_id"`
-	LastReported  int64   `json:"last_reported"`
+	BikeID             string   `json:"bike_id"`
+	Lat                float64  `json:"lat"`
+	Lon                float64  `json:"lon"`
+	IsDisabled         bool     `json:"is_disabled"`
+	IsReserved         bool     `json:"is_reserved"`
+	VehicleTypeID      string   `json:"vehicle_type_id"`
+	LastReported       int64    `json:"last_reported"`
+	CurrentRangeMeters *float64 `json:"current_range_meters,omitempty"`
+	CurrentFuelPercent *float64 `json:"current_fuel_percent,omitempty"`
 }
 
 type geofencingZones struct {
@@ -144,13 +147,20 @@ type vehicleStateCollection struct {
 	Vehicles    []vehicleState `json:"vehicles"`
 }
 
+type loadedVehicleState struct {
+	State  *vehicleStateCollection
+	Source string
+}
+
 type vehicleState struct {
-	BikeID                string  `json:"bike_id"`
-	Lat                   float64 `json:"lat"`
-	Lon                   float64 `json:"lon"`
-	LastReported          int64   `json:"last_reported"`
-	SamePlaceSince        int64   `json:"same_place_since"`
-	SamePlaceDurationSecs int64   `json:"same_place_duration_seconds"`
+	BikeID                string   `json:"bike_id"`
+	Lat                   float64  `json:"lat"`
+	Lon                   float64  `json:"lon"`
+	LastReported          int64    `json:"last_reported"`
+	CurrentRangeMeters    *float64 `json:"current_range_meters,omitempty"`
+	CurrentFuelPercent    *float64 `json:"current_fuel_percent,omitempty"`
+	SamePlaceSince        int64    `json:"same_place_since"`
+	SamePlaceDurationSecs int64    `json:"same_place_duration_seconds"`
 }
 
 type vehicleSnapshot struct {
@@ -158,6 +168,11 @@ type vehicleSnapshot struct {
 	SamePlaceSince        *int64
 	SamePlaceDurationSecs *int64
 	DwellKnown            bool
+}
+
+type mergeResult struct {
+	Snapshots    []vehicleSnapshot
+	MatchedCount int
 }
 
 func main() {
@@ -179,11 +194,23 @@ func main() {
 		exitf("fetch free_bike_status: %v", err)
 	}
 
-	previousState, err := loadPreviousVehicleState(ctx)
+	loadedState, err := loadPreviousVehicleState(ctx)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "load previous vehicle state: %v\n", err)
 	}
-	snapshots := mergeVehicleState(bikes.Data.Bikes, bikes.LastUpdated, previousState)
+	if loadedState != nil && loadedState.State != nil {
+		fmt.Printf(
+			"Using previous vehicle state from %s (last_updated=%d, vehicles=%d)\n",
+			loadedState.Source,
+			loadedState.State.LastUpdated,
+			len(loadedState.State.Vehicles),
+		)
+	} else {
+		fmt.Println("Using previous vehicle state: none")
+	}
+
+	merge := mergeVehicleState(bikes.Data.Bikes, bikes.LastUpdated, loadedState)
+	snapshots := merge.Snapshots
 
 	var zones geofencingZones
 	if err := fetchJSON(ctx, feedURLs["geofencing_zones"], &zones); err != nil {
@@ -275,6 +302,7 @@ func main() {
 	}
 
 	fmt.Printf("Generated %s and %s\n", geoJSONPath, htmlPath)
+	fmt.Printf("Matched vehicles to previous state: %d of %d\n", merge.MatchedCount, len(snapshots))
 	fmt.Printf("Vehicles outside designated station parking zones: %d of %d\n", len(outsideStations), len(bikes.Data.Bikes))
 	fmt.Printf("Vehicles outside geofenced parking-allowed zones: %d of %d\n", len(outsideGeofenced), len(bikes.Data.Bikes))
 }
@@ -594,17 +622,23 @@ func cross(a, b, c point) float64 {
 	return (b.Lon-a.Lon)*(c.Lat-a.Lat) - (b.Lat-a.Lat)*(c.Lon-a.Lon)
 }
 
-func loadPreviousVehicleState(ctx context.Context) (*vehicleStateCollection, error) {
+func loadPreviousVehicleState(ctx context.Context) (*loadedVehicleState, error) {
 	remoteURL := publishedStateURL()
 	if remoteURL != "" {
 		var remote vehicleStateCollection
 		if err := fetchJSON(ctx, remoteURL, &remote); err == nil {
-			return &remote, nil
+			return &loadedVehicleState{
+				State:  &remote,
+				Source: remoteURL,
+			}, nil
 		}
 	}
 
 	if local, err := readVehicleStateFile(filepath.Join(outputDir, stateFileName)); err == nil {
-		return local, nil
+		return &loadedVehicleState{
+			State:  local,
+			Source: filepath.Join(outputDir, stateFileName),
+		}, nil
 	} else if !os.IsNotExist(err) {
 		return nil, err
 	}
@@ -649,15 +683,14 @@ func publishedStateURL() string {
 	return strings.TrimRight(base, "/") + "/" + stateFileName
 }
 
-func mergeVehicleState(current []vehicle, snapshotUpdated int64, previous *vehicleStateCollection) []vehicleSnapshot {
-	prevByPosition := map[string]vehicleState{}
-	if previous != nil {
-		for _, prev := range previous.Vehicles {
-			prevByPosition[vehiclePositionKey(prev.Lat, prev.Lon)] = prev
-		}
+func mergeVehicleState(current []vehicle, snapshotUpdated int64, previous *loadedVehicleState) mergeResult {
+	var prevVehicles []vehicleState
+	if previous != nil && previous.State != nil {
+		prevVehicles = previous.State.Vehicles
 	}
 
 	merged := make([]vehicleSnapshot, 0, len(current))
+	matchedCount := 0
 	for _, bike := range current {
 		since := bike.LastReported
 		if since == 0 {
@@ -666,13 +699,13 @@ func mergeVehicleState(current []vehicle, snapshotUpdated int64, previous *vehic
 		duration := int64(0)
 		dwellKnown := false
 
-		if prev, ok := prevByPosition[vehiclePositionKey(bike.Lat, bike.Lon)]; ok {
+		if prev, ok := bestPreviousMatch(bike, prevVehicles); ok {
 			since = prev.SamePlaceSince
 			if since == 0 {
 				since = prev.LastReported
 			}
-			if since == 0 && previous != nil {
-				since = previous.LastUpdated
+			if since == 0 && previous != nil && previous.State != nil {
+				since = previous.State.LastUpdated
 			}
 
 			if since != 0 {
@@ -682,6 +715,7 @@ func mergeVehicleState(current []vehicle, snapshotUpdated int64, previous *vehic
 				}
 				dwellKnown = true
 			}
+			matchedCount++
 		}
 
 		merged = append(merged, vehicleSnapshot{
@@ -692,11 +726,66 @@ func mergeVehicleState(current []vehicle, snapshotUpdated int64, previous *vehic
 		})
 	}
 
-	return merged
+	return mergeResult{
+		Snapshots:    merged,
+		MatchedCount: matchedCount,
+	}
 }
 
-func vehiclePositionKey(lat, lon float64) string {
-	return fmt.Sprintf("%.6f,%.6f", lat, lon)
+func bestPreviousMatch(current vehicle, previous []vehicleState) (vehicleState, bool) {
+	bestIdx := -1
+	bestScore := math.MaxFloat64
+	bestDistance := math.MaxFloat64
+
+	for idx, prev := range previous {
+		dist := distanceBetweenMeters(
+			point{Lon: current.Lon, Lat: current.Lat},
+			point{Lon: prev.Lon, Lat: prev.Lat},
+		)
+		if dist > samePlaceMeters {
+			continue
+		}
+
+		score := tieBreakerScore(current, prev)
+		if bestIdx == -1 || score < bestScore || (score == bestScore && dist < bestDistance) {
+			bestIdx = idx
+			bestScore = score
+			bestDistance = dist
+		}
+	}
+
+	if bestIdx == -1 {
+		return vehicleState{}, false
+	}
+	return previous[bestIdx], true
+}
+
+func tieBreakerScore(current vehicle, prev vehicleState) float64 {
+	score := 0.0
+
+	if current.CurrentFuelPercent != nil && prev.CurrentFuelPercent != nil {
+		score += math.Abs(*current.CurrentFuelPercent-*prev.CurrentFuelPercent) * 1000
+	} else {
+		score += 1e6
+	}
+
+	if current.CurrentRangeMeters != nil && prev.CurrentRangeMeters != nil {
+		score += math.Abs(*current.CurrentRangeMeters-*prev.CurrentRangeMeters) / 10
+	} else {
+		score += 1e3
+	}
+
+	return score
+}
+
+func distanceBetweenMeters(a, b point) float64 {
+	lat0 := ((a.Lat + b.Lat) / 2) * math.Pi / 180
+	cosLat := math.Cos(lat0)
+	const metersPerDegreeLat = 111320.0
+
+	x := (b.Lon - a.Lon) * cosLat * metersPerDegreeLat
+	y := (b.Lat - a.Lat) * metersPerDegreeLat
+	return math.Hypot(x, y)
 }
 
 func writeOutsideGeoJSON(path string, outside []rankedVehicle, typeNames map[string]string) error {
@@ -799,6 +888,8 @@ func writeVehicleState(path string, lastUpdated int64, snapshots []vehicleSnapsh
 			Lat:                   snapshot.Vehicle.Lat,
 			Lon:                   snapshot.Vehicle.Lon,
 			LastReported:          snapshot.Vehicle.LastReported,
+			CurrentRangeMeters:    snapshot.Vehicle.CurrentRangeMeters,
+			CurrentFuelPercent:    snapshot.Vehicle.CurrentFuelPercent,
 			SamePlaceSince:        samePlaceSince,
 			SamePlaceDurationSecs: samePlaceDuration,
 		})
