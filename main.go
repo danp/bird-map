@@ -1110,7 +1110,7 @@ const htmlTemplate = `<!doctype html>
         return 'Stayed here: unknown<br>' +
           'Same spot since: unknown<br>';
       }
-      return 'Stayed here: ' + formatDuration(props.same_place_seconds) + '<br>' +
+      return 'Stayed here (at least): ' + formatDuration(props.same_place_seconds) + '<br>' +
         'Same spot since: ' + formatTimestamp(props.same_place_since) + '<br>';
     }
 
